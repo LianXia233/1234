@@ -49,10 +49,32 @@ if [ -z "${WINDRES:-}" ]; then
 fi
 
 # 1) 定位 mingw 强制注入的 default-manifest.o（native 绝对路径）
-SYS_DM="$("$CC" -print-file-name=default-manifest.o)"
+#
+#    Debian/Ubuntu 的 mingw 上 `-print-file-name` 有时解析不到（原样吐回文件名），
+#    所以再按常见安装位置兜底找一遍。
+SYS_DM="${SYS_DM_PATH:-$("$CC" -print-file-name=default-manifest.o)}"
 if [ ! -f "$SYS_DM" ]; then
-  echo "找不到 mingw 的 default-manifest.o：$SYS_DM" >&2
-  exit 1
+  for c in /usr/lib/gcc/x86_64-w64-mingw32/*/default-manifest.o \
+           /usr/lib/gcc-cross/x86_64-w64-mingw32/*/default-manifest.o \
+           /usr/x86_64-w64-mingw32/lib/default-manifest.o \
+           /usr/x86_64-w64-mingw32/lib/*/default-manifest.o; do
+    if [ -f "$c" ]; then
+      SYS_DM="$c"
+      break
+    fi
+  done
+fi
+
+# 两种嵌入方式：
+#   override —— 工具链带 default-manifest.o，用我们的资源对象覆盖它再原生链接（已真机验证）
+#   direct   —— 工具链压根没有这个文件（部分 Debian/Ubuntu 包），那就意味着链接器
+#               不会注入任何默认 .rsrc，直接把资源对象追加到链接命令行即可，
+#               不必改动系统目录，也就不需要 sudo
+MODE=override
+if [ ! -f "$SYS_DM" ]; then
+  MODE=direct
+  SYS_DM=""
+  echo ">>> 未找到 default-manifest.o，改用直接附加资源对象的链接方式"
 fi
 
 # 2) 用完整 app.rc（图标 + 版本 + comctl32 v6 manifest）编成 COFF 资源对象。
@@ -74,21 +96,40 @@ else
 fi
 ( cd crates/app && "$WINDRES" assets/app.rc -O coff -o "$OBJ" )
 
-# 3) 备份并覆盖工具链的 default-manifest.o；trap 保证退出前恢复（含出错/中断）。
-if [ ! -w "$SYS_DM" ]; then
-  echo "对 $SYS_DM 没有写权限，无法临时覆盖 default-manifest.o。" >&2
-  echo "Linux/CI 上请先执行：" >&2
-  echo "  sudo chmod a+w \"\$($CC -print-file-name=default-manifest.o)\"" >&2
-  exit 1
-fi
+# 3) 把资源对象交给链接器。两种方式都是 trap 保证退出前复原（含出错/中断）。
 BAK="target/.acgdev_dm_backup.o"
-cp "$SYS_DM" "$BAK"
-restore() {
-  cp "$BAK" "$SYS_DM" 2>/dev/null || true
-  rm -f "$BAK" "$OBJ" 2>/dev/null || true
+WRAP="target/.acgdev_cc_wrapper.sh"
+cleanup() {
+  if [ "$MODE" = override ] && [ -f "$BAK" ]; then
+    cp "$BAK" "$SYS_DM" 2>/dev/null || true
+  fi
+  rm -f "$BAK" "$OBJ" "$WRAP" 2>/dev/null || true
 }
-trap restore EXIT
-cp "$OBJ" "$SYS_DM"
+trap cleanup EXIT
+
+if [ "$MODE" = override ]; then
+  if [ ! -w "$SYS_DM" ]; then
+    echo "对 $SYS_DM 没有写权限，无法临时覆盖 default-manifest.o。" >&2
+    echo "Linux/CI 上请先执行：sudo chmod a+w \"$SYS_DM\"" >&2
+    echo "（或设置 SYS_DM_PATH 指向可写副本；若该发行版确实没有这个文件，脚本会自动改走 direct 方式）" >&2
+    exit 1
+  fi
+  cp "$SYS_DM" "$BAK"
+  cp "$OBJ" "$SYS_DM"
+  echo ">>> 方式：覆盖工具链 default-manifest.o（$SYS_DM）"
+else
+  # 生成一个只在本仓库 target/ 下的链接器包装，把资源对象追加到链接命令行末尾。
+  # 用环境变量指定 linker，不改全局工具链、不改 .cargo/config.toml。
+  CC_ABS="$(command -v "$CC" 2>/dev/null || echo "$CC")"
+  {
+    echo '#!/bin/sh'
+    echo "# 由 tools/build-win64.sh 生成，仅用于把 app.rc 的资源对象并进最终 PE"
+    printf 'exec "%s" "$@" "%s"\n' "$CC_ABS" "$OBJ"
+  } > "$WRAP"
+  chmod +x "$WRAP"
+  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$PWD/$WRAP"
+  echo ">>> 方式：链接器包装追加资源对象（$WRAP）"
+fi
 
 # 4) 工具链文件变了但项目没变，cargo 不会重链，强制重链。
 rm -f "$EXE"

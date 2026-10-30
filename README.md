@@ -5,6 +5,8 @@ AcgDev HTTP Downloader v0.05（.NET 10 WinForms）的 Rust 重写。核心目标
 
 ![界面](docs/screenshot.png)
 
+[![Build Windows exe](https://github.com/LianXia233/1234/actions/workflows/build-windows.yml/badge.svg)](https://github.com/LianXia233/1234/actions/workflows/build-windows.yml)
+
 ## 结构
 
 ```
@@ -25,10 +27,13 @@ crates/app/      GPUI 界面（500ms 拉取快照，与引擎只共享 Arc<Manag
 tools/
   ├─ subset_fonts.py      MiSans 子集化 + name 表修正
   ├─ make_icon.py         生成 assets/icon.ico
-  ├─ build-windows.sh     Windows exe 一键构建（交叉编译）
+  ├─ build-win64.sh       Windows exe 构建（MSYS2 本机 / Linux 交叉均可用）
+  ├─ build-windows.sh     早期交叉编译脚本（含 wine 着色器流程）
   ├─ gen_gpui_shaders.sh  补齐 gpui 缺失的 DXBC 着色器常量
   ├─ patch_icu_import.py  PE 导入名 icuuc.dll → icu.dll
   └─ fxc2-shim.sh         用 wine 跑 fxc2.exe 的包装
+.github/workflows/
+  └─ build-windows.yml    GitHub Actions 云编译（Linux runner 交叉出 exe）
 ```
 
 ## 字体
@@ -137,12 +142,47 @@ sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
 `libc::ENOATTR`，而 libc ≥ 0.2.18x 已把该常量限定到 BSD/Apple（Linux 用
 `ENODATA`，取值相同）。gpui → gpui_http_client → zed-async-tar 会因此编译失败。
 
+## 云端构建（GitHub Actions）
+
+推送即出 exe，本地不需要装 mingw、wine 或任何 Windows 工具链：
+
+| 触发 | 产物 |
+|---|---|
+| push 到 `main` / 开 PR | Actions 运行页 → Artifacts → `AcgDev-win64`（内含 `AcgDev-<版本>-win64-debug.exe`） |
+| 手动 `workflow_dispatch` | 同上 |
+| 打 `v*` tag | 除 artifact 外，自动创建 GitHub Release 并附上 exe |
+
+两个 job：
+
+- `test`：Linux 原生跑 `cargo test -p acgdev-core`（53 单元 + 8 端到端）与内嵌字体回归；
+- `build-windows`：ubuntu-latest 装 `mingw-w64` + `x86_64-pc-windows-gnu` target，
+  执行 `tools/build-win64.sh debug` 交叉编译。脚本末尾会校验 PE（MZ 头 / x86-64 /
+  comctl32 v6 token 正确 / 无 `icuuc.dll` 残留），任一项不过就让 job 失败，
+  避免把跑不起来的 exe 传上去。
+
+云端用 **debug profile** 而非 release：release 需要 Windows SDK 的 `fxc.exe` 预编译
+HLSL 着色器，Linux runner 上没有（要么自备 `fxc2.exe` + wine，要么换 Windows runner）。
+debug 走 GPUI 的运行时编译分支，功能一致。为补上 debug 的优化不足，workflow 设
+`FAST_DEBUG=1`，把 `acgdev` / `acgdev-core` 提到 O3（第三方依赖本来就是 `opt-level = 2`）。
+
+想在云端出 release 版：把 `build-windows` 的 `runs-on` 改成 `windows-latest`，
+用 `msys2/setup-msys2` 装 mingw 后同样调 `tools/build-win64.sh release`
+（runner 自带 Windows SDK 的 fxc.exe），代价是 2 倍分钟数。
+
 ## 构建 Windows exe（在 Linux 上交叉编译）
 
 ```bash
 rustup target add x86_64-pc-windows-gnu
 sudo apt install gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 wine64
-./tools/build-windows.sh          # → dist/AcgDev-0.1.0-win64.exe
+./tools/build-win64.sh            # → dist/AcgDev-0.1.0-win64-debug.exe
+```
+
+`tools/build-win64.sh` 在 MSYS2/Git Bash（Windows 本机）与 Linux 两种宿主上都能跑：
+它自动探测资源编译器名字（`windres` / `x86_64-w64-mingw32-windres`），并在没有
+`cygpath` 时改用 POSIX 路径。Linux 上需要先放开工具链 `default-manifest.o` 的写权限：
+
+```bash
+sudo chmod a+w "$(x86_64-w64-mingw32-gcc -print-file-name=default-manifest.o)"
 ```
 
 产物是单文件 GUI 程序：静态链接 libgcc，只依赖系统 DLL

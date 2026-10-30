@@ -69,8 +69,20 @@ jobs:
       # build-win64.sh 靠“临时覆盖工具链自带的 default-manifest.o”让链接器原生产出
       # 带 comctl32 v6 manifest 的合法 PE（详见脚本开头注释）。工具链装在 /usr 下，
       # runner 用户默认没有写权限，这里只放开这一个文件的权限。
-      - name: 放开 default-manifest.o 的写权限
-        run: sudo chmod a+w "$(x86_64-w64-mingw32-gcc -print-file-name=default-manifest.o)"
+      # 少数发行版根本没有这个文件，此时脚本会自动改走“直接附加资源对象”的方式，
+      # 这里就不必改任何系统文件。
+      - name: 放开 default-manifest.o 的写权限（若存在）
+        run: |
+          DM="$(x86_64-w64-mingw32-gcc -print-file-name=default-manifest.o)"
+          if [ ! -f "$DM" ]; then
+            DM="$(find /usr -name default-manifest.o 2>/dev/null | head -1)"
+          fi
+          if [ -n "$DM" ] && [ -f "$DM" ]; then
+            echo "default-manifest.o = $DM"
+            sudo chmod a+w "$DM"
+          else
+            echo "工具链没有 default-manifest.o：构建脚本会改走 direct 链接方式"
+          fi
 
       - name: 构建 exe
         env:
