@@ -1,0 +1,9 @@
+# 构建脚本与 CI 配置必须在任何平台上都以 LF 检出：
+# CRLF 的 .sh 在 Linux runner 上会报 “$'\r': command not found”。
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# 资源脚本/清单交给 windres 处理，保持仓库原样即可
+*.rc text eol=lf
+*.manifest text eol=lf
