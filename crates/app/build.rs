@@ -37,11 +37,11 @@ fn main() {
             Ok(st) if st.success() => {
                 // 注意：windows-gnu 下 mingw 的 ld 无法合并两个 .rsrc 节
                 // （我们的资源 + mingw 默认空 manifest），会导致 .rsrc 节 corrupt。
-                // 因此这里只负责把资源编译成 app_res.o 供后续注入脚本抽取，
-                // 不再直接链接进 exe（避免与 default-manifest.o 冲突）。
-                // 真正的图标/版本/comctl32 v6 manifest 由 tools/embed_manifest.py
-                // 在链接后重建并注入。
-                println!("cargo:warning=已生成 app_res.o（{0}），将由 embed_manifest.py 注入", obj.display());
+                // 因此这里只负责把资源编译成 app_res.o 备用，绝不链入 exe
+                // （避免与 default-manifest.o 冲突）。真正的图标/版本/comctl32 v6
+                // manifest 由 tools/fix_pe.py 在链接后通过 windres 重新生成并整体
+                // 注入（做一次确定性 PE 重写）。app_res.o 此处仅作为兜底产物。
+                println!("cargo:warning=已生成 app_res.o（{0}）；资源最终由 fix_pe.py 注入", obj.display());
                 return;
             }
             Ok(st) => last_err = format!("{tool} 退出码 {st}"),
