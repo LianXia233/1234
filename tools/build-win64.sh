@@ -21,6 +21,13 @@
 # 用法：
 #   bash tools/build-win64.sh [debug|release]
 #   release 需要 Windows SDK 的 fxc.exe（GPUI 着色器离线预编译）；本机无 fxc 用 debug。
+#
+# 两种宿主环境都支持：
+#   · Windows（MSYS2 / Git Bash + WinLibs）：windres 是 Windows 原生程序，路径要
+#     用 cygpath 转成 W:\ 形式；对象文件名也相应写成反斜杠路径。
+#   · Linux（CI 交叉编译）：windres 是原生 ELF，直接用 POSIX 路径即可，且工具链
+#     文件在 /usr 下，需要对 default-manifest.o 有写权限（CI 里提前 chmod）。
+# 两种环境下链接产物完全一致，因为资源内容与链接方式不变。
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 
@@ -29,7 +36,17 @@ TARGET="x86_64-pc-windows-gnu"
 EXE="target/${TARGET}/${PROFILE}/acgdev.exe"
 
 CC="${CC:-x86_64-w64-mingw32-gcc}"
-WINDRES="${WINDRES:-windres}"
+# windres 的名字随发行版不同：Debian/Ubuntu 带完整 target 前缀，MSYS2/WinLibs 就叫 windres。
+if [ -z "${WINDRES:-}" ]; then
+  if command -v x86_64-w64-mingw32-windres >/dev/null 2>&1; then
+    WINDRES="x86_64-w64-mingw32-windres"
+  elif command -v windres >/dev/null 2>&1; then
+    WINDRES="windres"
+  else
+    echo "找不到 windres（需要 mingw-w64 的 x86_64-w64-mingw32-windres）" >&2
+    exit 1
+  fi
+fi
 
 # 1) 定位 mingw 强制注入的 default-manifest.o（native 绝对路径）
 SYS_DM="$("$CC" -print-file-name=default-manifest.o)"
@@ -47,11 +64,23 @@ fi
 #    会因 XML 声明写着 encoding="UTF-8" 而被解析器按 UTF-8 读取，报“无效的 Xml 语法”。
 #    真正的关键点是 publicKeyToken 必须是 6595b64144ccf1df（WinSxS 实测值），
 #    写成 6595b64144ccf175 会导致“找不到从属程序集”。
-REPO_WIN="$(cygpath -w "$PWD")"
-OBJ="$REPO_WIN\\target\\.acgdev_manifest.o"
+mkdir -p target
+if command -v cygpath >/dev/null 2>&1; then
+  # MSYS：windres 是 Windows 原生程序，必须给它 Windows 形式的路径。
+  OBJ="$(cygpath -w "$PWD")\\target\\.acgdev_manifest.o"
+else
+  # Linux：windres 是原生 ELF，POSIX 路径即可。
+  OBJ="$PWD/target/.acgdev_manifest.o"
+fi
 ( cd crates/app && "$WINDRES" assets/app.rc -O coff -o "$OBJ" )
 
 # 3) 备份并覆盖工具链的 default-manifest.o；trap 保证退出前恢复（含出错/中断）。
+if [ ! -w "$SYS_DM" ]; then
+  echo "对 $SYS_DM 没有写权限，无法临时覆盖 default-manifest.o。" >&2
+  echo "Linux/CI 上请先执行：" >&2
+  echo "  sudo chmod a+w \"\$($CC -print-file-name=default-manifest.o)\"" >&2
+  exit 1
+fi
 BAK="target/.acgdev_dm_backup.o"
 cp "$SYS_DM" "$BAK"
 restore() {
@@ -65,8 +94,18 @@ cp "$OBJ" "$SYS_DM"
 rm -f "$EXE"
 
 # 5) 构建（链接器 strip 去调试节）
+#
+#    FAST_DEBUG=1 时把本项目两个 crate 提到 O3（第三方依赖本来就是 opt-level=2）。
+#    默认关闭，以保证开发期增量编译速度；云端出可供日常使用的 exe 时打开。
 case "$PROFILE" in
-  debug)   cargo build --target "$TARGET" -p acgdev --config "profile.dev.strip=true" ;;
+  debug)
+    EXTRA=()
+    if [ "${FAST_DEBUG:-0}" = "1" ]; then
+      EXTRA=(--config 'profile.dev.package.acgdev-core.opt-level=3'
+             --config 'profile.dev.package.acgdev.opt-level=3')
+    fi
+    cargo build --target "$TARGET" -p acgdev --config "profile.dev.strip=true" "${EXTRA[@]}"
+    ;;
   release) cargo build --release --target "$TARGET" -p acgdev --config "profile.release.strip=true" ;;
   *) echo "未知 profile：$PROFILE（用 debug 或 release）" >&2; exit 1 ;;
 esac
@@ -104,3 +143,13 @@ print("RESULT:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
 PY
 echo ">>> 完成：$EXE"
+
+# 8) 拷一份到 dist/，文件名带版本号与 profile，便于 CI 直接上传 artifact
+VER="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+[ -n "$VER" ] || VER="0.1.0"
+SUFFIX=""
+[ "$PROFILE" = "debug" ] && SUFFIX="-debug"
+DIST="dist/AcgDev-${VER}-win64${SUFFIX}.exe"
+mkdir -p dist
+cp "$EXE" "$DIST"
+echo ">>> 产物：$DIST"

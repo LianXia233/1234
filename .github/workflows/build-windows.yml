@@ -1,0 +1,97 @@
+name: Build Windows exe
+
+# 云端交叉编译：Linux runner + mingw-w64 → 单个 x86_64 Windows .exe。
+#
+# 为什么不用 windows-latest 原生编译：
+#   · 分钟数是 Linux 的 2 倍，而本工程用 mingw 就能原生链出合法 PE，宿主是 Linux 没差别；
+#   · release profile 需要 Windows SDK 的 fxc.exe 预编译 HLSL 着色器，runner 上不保证有。
+# debug profile 走的是 GPUI 的运行时编译分支，不需要 fxc，因此默认构建 debug。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-pc-windows-gnu
+
+jobs:
+  test:
+    name: 单元测试（Linux 原生）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-test
+
+      - name: core 单测 + 端到端
+        run: cargo test -p acgdev-core
+
+      - name: 内嵌字体回归
+        run: cargo test -p acgdev --test fonts
+
+  build-windows:
+    name: 交叉编译 Windows exe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 mingw-w64 交叉工具链
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mingw-w64
+          x86_64-w64-mingw32-gcc --version | head -1
+          x86_64-w64-mingw32-windres --version | head -1
+
+      - name: 安装 Rust + windows-gnu 目标
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: win64-gnu
+
+      # build-win64.sh 靠“临时覆盖工具链自带的 default-manifest.o”让链接器原生产出
+      # 带 comctl32 v6 manifest 的合法 PE（详见脚本开头注释）。工具链装在 /usr 下，
+      # runner 用户默认没有写权限，这里只放开这一个文件的权限。
+      - name: 放开 default-manifest.o 的写权限
+        run: sudo chmod a+w "$(x86_64-w64-mingw32-gcc -print-file-name=default-manifest.o)"
+
+      - name: 构建 exe
+        env:
+          # 云端产物供日常使用，把本项目两个 crate 提到 O3
+          FAST_DEBUG: "1"
+        run: bash tools/build-win64.sh debug
+
+      - name: 列出产物
+        run: ls -lh dist/
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: AcgDev-win64
+          path: dist/*.exe
+          if-no-files-found: error
+          compression-level: 6
+
+      - name: 发布到 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          generate_release_notes: true
