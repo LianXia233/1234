@@ -16,7 +16,7 @@
 //! 2. 任何异常/取消路径，未完成区间由 [`RangeLease`] 的 Drop 自动归还（F-02）
 //! 3. 续传前校验 ETag / 长度指纹（F-03）
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -42,6 +42,9 @@ pub const CHUNK: u64 = 2 * 1024 * 1024;
 
 /// aria2 的 piece-length 默认值，用于生成 bitfield。
 pub const PIECE_LEN: u64 = 1024 * 1024;
+
+/// 速度滑动窗口：取最近 5 秒的样本算平均，兼顾平滑与响应。
+pub const SPEED_WINDOW: Duration = Duration::from_secs(5);
 
 pub type Gid = u64;
 
@@ -826,6 +829,83 @@ fn build_bitfield(done: Vec<Segment>, total: Option<u64>, piece_len: u64) -> Vec
     bits
 }
 
+/// 第 `i` 个分片是否已下载完。
+///
+/// 与 [`build_bitfield`] 严格对称：高位在前，第 `i` 片是
+/// `byte[i/8] & (1 << (7 - i%8))`。方向写反会让进度图左右镜像。
+pub fn piece_done(bitfield: &[u8], i: usize) -> bool {
+    match bitfield.get(i / 8) {
+        Some(b) => b & (1 << (7 - (i % 8))) != 0,
+        None => false,
+    }
+}
+
+/// 把分片位图还原成**连续的已完成区间**（字节，半开区间 `[start, end)`）。
+///
+/// 相邻分片会被合并，于是「前 32 片完成」显示成一段 `0–32 MB`，而不是罗列 32 行。
+pub fn done_segments(bitfield: &[u8], num_pieces: u64, piece_len: u64) -> Vec<Segment> {
+    if piece_len == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start: Option<u64> = None;
+    for i in 0..num_pieces as usize {
+        match (piece_done(bitfield, i), start) {
+            (true, None) => start = Some(i as u64),
+            (false, Some(s)) => {
+                out.push((s * piece_len, i as u64 * piece_len));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        out.push((s * piece_len, num_pieces * piece_len));
+    }
+    out
+}
+
+/// 未完成区间：已完成区间在 `[0, num_pieces*piece_len)` 上的补集。
+pub fn pending_segments(bitfield: &[u8], num_pieces: u64, piece_len: u64) -> Vec<Segment> {
+    if piece_len == 0 {
+        return Vec::new();
+    }
+    let total = num_pieces * piece_len;
+    let mut out = Vec::new();
+    let mut cur = 0u64;
+    for (a, b) in done_segments(bitfield, num_pieces, piece_len) {
+        if a > cur {
+            out.push((cur, a));
+        }
+        cur = cur.max(b);
+    }
+    if cur < total {
+        out.push((cur, total));
+    }
+    out
+}
+
+/// 把区间列表格式化成可读文本，超出 `limit` 段时折叠。
+///
+/// 例：`0 B–32.00 MB · 48.00–49.00 MB（共 3 段）`
+pub fn fmt_segments(ranges: &[Segment], limit: usize) -> String {
+    if ranges.is_empty() {
+        return "无".to_string();
+    }
+    let shown: Vec<String> = ranges
+        .iter()
+        .take(limit)
+        .map(|&(a, b)| format!("{}–{}", size_str(a), size_str(b)))
+        .collect();
+    let mut s = shown.join(" · ");
+    if ranges.len() > limit {
+        s.push_str(&format!(" … 另 {} 段", ranges.len() - limit));
+    } else if ranges.len() > 1 {
+        s.push_str(&format!("（共 {} 段）", ranges.len()));
+    }
+    s
+}
+
 fn unique_path(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
@@ -884,28 +964,44 @@ pub fn eta_str(remaining: u64, speed: u64) -> String {
     )
 }
 
-/// 一秒窗口的速度采样器。
+/// 滑动窗口速度采样器。
+///
+/// 不能只算「相邻两次采样的增量」：进度是成批落盘的（一次 commit 可能就是 10MB），
+/// 而采样每秒一次，于是多数采样秒的增量为 0，速度被硬置 0、只在 commit 那一秒飙高，
+/// UI 上表现为速度几乎恒为 0、ETA 永远是「—」。
+/// 改成保留最近 `SPEED_WINDOW` 内的样本、用窗口首尾差值计算，速度就平滑了。
 #[derive(Default)]
 struct SpeedMeter {
-    last_bytes: u64,
-    last_at: Option<Instant>,
+    /// (采样时刻, 当时的累计完成字节)，按时间递增。
+    samples: VecDeque<(Instant, u64)>,
 }
 
 impl SpeedMeter {
+    /// 记录一次采样并返回当前速度（字节/秒）；样本不足时返回 None。
     fn sample(&mut self, bytes: u64) -> Option<u64> {
         let now = Instant::now();
-        let Some(prev) = self.last_at else {
-            self.last_at = Some(now);
-            self.last_bytes = bytes;
+        self.samples.push_back((now, bytes));
+
+        // 丢弃窗口外的旧样本，但至少留 2 个，否则算不出差值
+        while self.samples.len() > 2 {
+            let oldest = self.samples.front().unwrap().0;
+            if now.duration_since(oldest) > SPEED_WINDOW {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.samples.len() < 2 {
             return None;
-        };
-        let dt = now.duration_since(prev).as_secs_f64();
+        }
+
+        let (t0, b0) = *self.samples.front().unwrap();
+        let dt = now.duration_since(t0).as_secs_f64();
         if dt < 0.2 {
             return None;
         }
-        let delta = bytes.saturating_sub(self.last_bytes);
-        self.last_bytes = bytes;
-        self.last_at = Some(now);
+        // 单调保护：续传/重置导致字节回退时按 0 计，避免算出负速度
+        let delta = bytes.saturating_sub(b0);
         Some((delta as f64 / dt) as u64)
     }
 }
@@ -981,6 +1077,52 @@ mod tests {
         );
         assert_eq!(bf.len(), 1);
         assert_eq!(bf[0], 0b1010_0000);
+    }
+
+    #[test]
+    fn piece_done_matches_bitfield_layout() {
+        let bf = vec![0b1010_0000u8];
+        assert!(piece_done(&bf, 0));
+        assert!(!piece_done(&bf, 1));
+        assert!(piece_done(&bf, 2));
+        assert!(!piece_done(&bf, 3));
+        // 越界返回 false 而不是 panic
+        assert!(!piece_done(&bf, 100));
+    }
+
+    #[test]
+    fn done_segments_merges_adjacent_pieces() {
+        let bf = build_bitfield(
+            vec![(0, PIECE_LEN), (2 * PIECE_LEN, 3 * PIECE_LEN)],
+            Some(4 * PIECE_LEN),
+            PIECE_LEN,
+        );
+        assert_eq!(
+            done_segments(&bf, 4, PIECE_LEN),
+            vec![(0, PIECE_LEN), (2 * PIECE_LEN, 3 * PIECE_LEN)]
+        );
+        assert_eq!(
+            pending_segments(&bf, 4, PIECE_LEN),
+            vec![(PIECE_LEN, 2 * PIECE_LEN), (3 * PIECE_LEN, 4 * PIECE_LEN)]
+        );
+    }
+
+    #[test]
+    fn segments_degenerate_cases_are_safe() {
+        assert!(done_segments(&[], 0, PIECE_LEN).is_empty());
+        assert!(pending_segments(&[], 0, PIECE_LEN).is_empty());
+        // piece_len 为 0 时直接返回，避免除零 / 溢出
+        assert!(done_segments(&[0xff], 8, 0).is_empty());
+        assert_eq!(fmt_segments(&[], 4), "无");
+    }
+
+    #[test]
+    fn fmt_segments_folds_overflow() {
+        let many: Vec<Segment> = (0..6)
+            .map(|i| (i * PIECE_LEN, (i + 1) * PIECE_LEN))
+            .collect();
+        let s = fmt_segments(&many, 4);
+        assert!(s.contains("另 2 段"), "实际输出: {s}");
     }
 
     #[test]
