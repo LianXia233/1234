@@ -2,7 +2,11 @@
 
 1 ICON "assets/icon.ico"
 
-/* RT_MANIFEST = 24。必需：声明 comctl32 v6，否则 TaskDialogIndirect 找不到入口点。 */
+/* RT_MANIFEST = 24，ID 1。声明依赖 comctl32 v6，否则加载器绑定 system32 的 v5
+   版 comctl32，运行时会 “无法定位程序输入点 TaskDialogIndirect”。
+   注意：构建时本 .rc 编译出的 app_res.o 不链入 exe（避免与 mingw 强制链入的
+   default-manifest.o 的两个 .rsrc 节冲突导致 corrupt），改由
+   tools/embed_manifest.py 在链接后把这份完整资源整体注入。 */
 1 24 "assets/app.manifest"
 
 1 VERSIONINFO
