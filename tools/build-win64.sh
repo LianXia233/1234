@@ -38,61 +38,25 @@ if [ ! -f "$SYS_DM" ]; then
   exit 1
 fi
 
-# 2) 先把 app.manifest 转成 UTF-16LE（无 BOM），再用 windres 编成 COFF 资源对象。
-#    关键点：Windows 的 SxS 激活上下文解析 RT_MANIFEST 时按 UTF-16LE 读取；直接把
-#    UTF-8 的 app.manifest 交给 windres 会被原样拷贝进资源，Win11 便会报
-#    “应用程序的并行配置不正确”。所以这里先转编码再编译。
-#    图标 / 版本 / manifest 全部用 native 绝对路径，避免 cd 子 shell 里路径变相对。
-REPO_WIN="$(cygpath -m "$PWD")"
-OBJ="$REPO_WIN/target/.acgdev_manifest.o"
-MAN_U16="$REPO_WIN/target/.acgdev_app.manifest.utf16"
-RC_TMP="$REPO_WIN/target/.acgdev_app.rc"
-ICON_WIN="$(cygpath -m "$PWD/crates/app/assets/icon.ico")"
-MAN_SRC_WIN="$(cygpath -m "$PWD/crates/app/assets/app.manifest")"
-
-python3 -c "open(r'$MAN_U16','wb').write(open(r'$MAN_SRC_WIN','rb').read().decode('utf-8').encode('utf-16-le'))"
-
-cat > "$RC_TMP" <<RC
-1 ICON "$ICON_WIN"
-
-/* RT_MANIFEST = 24, ID 1. Requires comctl32 v6 for TaskDialogIndirect. */
-1 24 "$MAN_U16"
-
-1 VERSIONINFO
-FILEVERSION     0,1,0,0
-PRODUCTVERSION  0,1,0,0
-FILEOS          0x40004L
-FILETYPE        0x1L
-BEGIN
-    BLOCK "StringFileInfo"
-    BEGIN
-        BLOCK "080404b0"
-        BEGIN
-            VALUE "CompanyName",      "AcgDev"
-            VALUE "FileDescription",  "AcgDev HTTP Downloader"
-            VALUE "FileVersion",      "0.1.0"
-            VALUE "InternalName",     "acgdev"
-            VALUE "LegalCopyright",   "MIT License"
-            VALUE "OriginalFilename", "AcgDev.exe"
-            VALUE "ProductName",      "AcgDev HTTP Downloader"
-            VALUE "ProductVersion",   "0.1.0"
-        END
-    END
-    BLOCK "VarFileInfo"
-    BEGIN
-        VALUE "Translation", 0x804, 1200
-    END
-END
-RC
-
-"$WINDRES" -O coff "$RC_TMP" -o "$OBJ"
+# 2) 用完整 app.rc（图标 + 版本 + comctl32 v6 manifest）编成 COFF 资源对象。
+#    windres 以 crates/app 为工作目录编译 assets/app.rc，使 assets/icon.ico 等
+#    相对路径可正确解析。输出写成 native 绝对路径，避免在 cd 子 shell 里变相对。
+#
+#    关于 manifest 编码：保持 UTF-8 原样嵌入即可。事件日志实测（SideBySide 事件）
+#    证明 Windows SxS 能正常解析 UTF-8 的 RT_MANIFEST；反而改成无 BOM 的 UTF-16LE
+#    会因 XML 声明写着 encoding="UTF-8" 而被解析器按 UTF-8 读取，报“无效的 Xml 语法”。
+#    真正的关键点是 publicKeyToken 必须是 6595b64144ccf1df（WinSxS 实测值），
+#    写成 6595b64144ccf175 会导致“找不到从属程序集”。
+REPO_WIN="$(cygpath -w "$PWD")"
+OBJ="$REPO_WIN\\target\\.acgdev_manifest.o"
+( cd crates/app && "$WINDRES" assets/app.rc -O coff -o "$OBJ" )
 
 # 3) 备份并覆盖工具链的 default-manifest.o；trap 保证退出前恢复（含出错/中断）。
 BAK="target/.acgdev_dm_backup.o"
 cp "$SYS_DM" "$BAK"
 restore() {
   cp "$BAK" "$SYS_DM" 2>/dev/null || true
-  rm -f "$BAK" "$OBJ" "$MAN_U16" "$RC_TMP" 2>/dev/null || true
+  rm -f "$BAK" "$OBJ" 2>/dev/null || true
 }
 trap restore EXIT
 cp "$OBJ" "$SYS_DM"
@@ -124,21 +88,17 @@ e = struct.unpack_from("<I", d, 0x3C)[0]
 machine = struct.unpack_from("<H", d, e + 4)[0]
 print("机器码 x64(0x8664):", machine == 0x8664)
 
-def u16(s):
-    return s.encode("utf-16-le")
-
-# SxS 要求 RT_MANIFEST 必须是 UTF-16LE；误存成 UTF-8 会让 Win11 报“并行配置不正确”。
-asmv1 = u16("urn:schemas-microsoft-com:asm.v1")
-ccv6  = u16("Microsoft.Windows.Common-Controls")
-token = u16("6595b64144ccf175")
-is_u16 = (asmv1 in d) and (ccv6 in d)
-is_u8  = b"urn:schemas-microsoft-com:asm.v1" in d
-print("manifest 按 UTF-16LE 嵌入:", is_u16)
-print("manifest 误存成 UTF-8   :", is_u8)
-print("comctl32 v6 token(utf16):", token in d)
+# manifest 以 UTF-8 嵌入（本机 SxS 实测可解析）；token 必须是 WinSxS 里的真实值。
+asmv1 = b"urn:schemas-microsoft-com:asm.v1"
+ccv6  = b"Microsoft.Windows.Common-Controls"
+token = b"6595b64144ccf1df"   # comctl32 v6 真实 publicKeyToken
+bad   = b"6595b64144ccf175"   # 错误值：会被报“找不到从属程序集”
+print("manifest 以 UTF-8 嵌入:", (asmv1 in d) and (ccv6 in d))
+print("comctl32 v6 token 正确:", token in d)
+print("错误 token 残留       :", bad in d)
 print("icuuc.dll 残留:", b"icuuc.dll" in d, "| icu.dll 引用:", b"icu.dll" in d)
-if not (d[:2] == b"MZ" and machine == 0x8664 and is_u16 and not is_u8
-        and token in d and b"icuuc.dll" not in d):
+if not (d[:2] == b"MZ" and machine == 0x8664 and asmv1 in d and ccv6 in d
+        and token in d and bad not in d and b"icuuc.dll" not in d):
     ok = False
 print("RESULT:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
