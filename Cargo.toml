@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = [
+    "rt-multi-thread", "fs", "io-util", "sync", "time", "macros", "signal",
+] }
+tokio-util = "0.7"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls", "stream", "http2",
+] }
+bytes = "1"
+futures = "0.3"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+anyhow = "1"
+thiserror = "2"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+percent-encoding = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# 开发时让第三方依赖保持优化，避免 GPUI 交互卡顿
+[profile.dev.package."*"]
+opt-level = 2
+
+# ── 依赖补丁 ────────────────────────────────────────────────────────────
+# xattr 0.2.3 在 Linux 上直接引用 libc::ENOATTR，而 libc ≥ 0.2.18x 已把
+# 该常量限定到 BSD/Apple 平台（Linux 用 ENODATA，两者同为 61）。
+# 上游未跟进，导致 gpui → gpui_http_client → zed-async-tar → xattr 编译失败。
+# 本地 vendor 补丁只改这一个常量，其余代码与 0.2.3 完全一致。
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }

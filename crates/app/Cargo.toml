@@ -1,0 +1,27 @@
+[package]
+name = "acgdev"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AcgDev HTTP Downloader — Rust + GPUI"
+
+[dependencies]
+acgdev-core = { path = "../core" }
+# 关掉 gpui 的 windows-manifest：它的 build.rs 只在 Windows **主机**上才嵌入资源，
+# 交叉编译时不会执行；manifest 统一由本 crate 的 assets/app.rc 提供，
+# 两边都嵌会在 Windows 主机上产生重复的 RT_MANIFEST 1。
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+# 版本与 gpui 在 Linux 上的 cosmic-text → fontdb 保持一致，
+# 保证测试验证的就是运行时实际使用的那套解析逻辑。
+fontdb = "0.16"
+ttf-parser = "0.20"

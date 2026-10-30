@@ -1,0 +1,31 @@
+[package]
+name = "acgdev-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AcgDev 下载引擎核心：区间调度、断点续传、落盘校验、aria2 兼容 RPC"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+reqwest = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+percent-encoding = { workspace = true }
+
+# aria2 兼容的 JSON-RPC 服务端
+axum = { version = "0.8", features = ["ws", "json", "tokio"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "full"] }
+tempfile = "3"

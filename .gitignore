@@ -1,0 +1,14 @@
+# 构建产物
+/target/
+/dist/*.exe
+/dist/*.zip
+
+# 构建期第三方工具：vkd3d-shader 封装出的 fxc 兼容 CLI（约 19 MB）
+# 来源见 README「构建 Windows exe」，不随仓库分发
+/tools/fxc2.exe
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store

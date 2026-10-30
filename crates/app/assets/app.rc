@@ -1,0 +1,32 @@
+#include <windows.h>
+
+1 ICON "assets/icon.ico"
+
+/* RT_MANIFEST = 24。必需：声明 comctl32 v6，否则 TaskDialogIndirect 找不到入口点。 */
+1 24 "assets/app.manifest"
+
+1 VERSIONINFO
+FILEVERSION     0,1,0,0
+PRODUCTVERSION  0,1,0,0
+FILEOS          0x40004L
+FILETYPE        0x1L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "AcgDev"
+            VALUE "FileDescription",  "AcgDev HTTP Downloader"
+            VALUE "FileVersion",      "0.1.0"
+            VALUE "InternalName",     "acgdev"
+            VALUE "LegalCopyright",   "MIT License"
+            VALUE "OriginalFilename", "AcgDev.exe"
+            VALUE "ProductName",      "AcgDev HTTP Downloader"
+            VALUE "ProductVersion",   "0.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
