@@ -5,9 +5,7 @@
     <assemblyIdentity type="win32" name="AcgDev.HTTPDownloader"
                       version="0.1.0.0" processorArchitecture="amd64"/>
 
-    <!-- 关键：没有这一条，加载器只绑定 system32 里的 comctl32 v5，
-         而 gpui 用到的 TaskDialogIndirect 只在 v6 中导出，进程会在
-         "无法定位程序输入点" 处直接起不来。 -->
+    <!-- Request comctl32 v6 so TaskDialogIndirect (used by GPUI) is available. -->
     <dependency>
         <dependentAssembly>
             <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
@@ -35,8 +33,7 @@
 
     <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
         <application>
-            <!-- Windows 10 / 11 -->
-            <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+            <supportedOS Id="{8e4e6278-229d-4f51-a89b-35769bdc8d9f}"/>
         </application>
     </compatibility>
 </assembly>
